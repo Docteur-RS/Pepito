@@ -1,0 +1,264 @@
+diff -ur Pepito/source/daemon.c Pepito_patch/source/daemon.c
+--- Pepito/source/daemon.c	2013-04-15 19:55:50.000000000 +0200
++++ Pepito_patch/source/daemon.c	2014-04-20 17:37:22.429322000 +0200
+@@ -22,9 +22,6 @@
+ #include "daemon.h"
+ #include "network.h"
+ 
+-/* Main daemon functions ---------------------------------------- */
+-
+-/* sig */
+ 
+ void
+ sigHandler(int sig)
+@@ -43,8 +40,6 @@
+   exit(EXIT_SUCCESS);
+ }
+ 
+-/* run */
+-
+ int
+ checkOtherProcess(void)
+ {
+@@ -109,8 +104,6 @@
+   return EXIT_SUCCESS;
+ }
+ 
+-/* stop */
+-
+ int
+ stopDaemon(void)
+ {
+diff -ur Pepito/source/main.c Pepito_patch/source/main.c
+--- Pepito/source/main.c	2013-04-15 19:55:50.000000000 +0200
++++ Pepito_patch/source/main.c	2014-04-20 18:07:45.092371000 +0200
+@@ -13,6 +13,8 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
++#include <sys/ptrace.h>
++#include <sys/wait.h>
+ 
+ #include "pepito.h"
+ #include "network.h"
+@@ -47,8 +49,6 @@
+   {NULL,         0}
+ };
+ 
+-/* --- checkPassword() ---------------------------------------------- */
+-
+ int
+ checkPassword(char *password)
+ {
+@@ -58,6 +58,11 @@
+   int			isAdmin = 0;
+   int			i;
+ 
++  if (strlen(password) > 512)
++    {
++      printf("New password too long.\n");
++      return NOBODY;
++    }
+   if (!strcmp(password, userPassword))
+     isUser = 1;
+   strcpy(savePassword, password);
+@@ -70,24 +75,24 @@
+   if (!(isAdmin | isUser)) {
+     logMessage = malloc(sizeof(*logMessage) * (strlen(password) + 21));
+     memset(logMessage, 0, strlen(password) + 21);
+-    strcat(logMessage, "Invalid password : ");
+-    strcat(logMessage, savePassword);
+-    strcat(logMessage, "\n");
++    strncat(logMessage, "Invalid password : ", strlen("Invalid password : "));
++    strncat(logMessage, savePassword, strlen(savePassword));
++    strncat(logMessage, "\n", strlen("\n"));
+     sendLogMessage(logMessage);
+     free(logMessage);
+   }
+   return isAdmin ? ADMIN : isUser ? USER : NOBODY;
+ }
+ 
+-/* --- change*Password() -------------------------------------------- */
+-
+ static void
+ changeUserPassword(char *password)
+ {
+-  if (password) {
++  if (password && strlen(password) <= 512) {
+     strcpy(userPassword, password);
+     sendLogMessage(PASSWD_CHANGE);
+   }
++  else
++    printf("New password too long.\n");
+ }
+ 
+ static void
+@@ -95,16 +100,16 @@
+ {
+   int			i;
+ 
+-  if (password) {
++  if (password && strlen(password) <= 512) {
+     for (i = 0; password[i]; ++i)
+       password[i] ^= xorKey;
+     strcpy(adminPassword, password);
+     sendLogMessage(PASSWD_CHANGE);
+   }
++  else
++    printf("New password too long.\n");
+ }
+ 
+-/* --- Packet handlers ---------------------------------------------- */
+-
+ static int
+ handlerChangePassword(void *packetPtr, size_t packetSize)
+ {
+@@ -125,8 +130,6 @@
+   return 0;
+ }
+ 
+-/* --- Display all Recipes ------------------------------------------ */
+-
+ static int
+ handlerDisplayRecipes(void *packetPtr, size_t packetSize)
+ {
+@@ -148,8 +151,6 @@
+   return 0;
+ }
+ 
+-/* --- Display Stock of Granola Corp --------------------------------- */
+-
+ static int
+ handlerDisplayStock(void *packetPtr, size_t packetSize)
+ {
+@@ -179,8 +180,6 @@
+   return 0;
+ }
+ 
+-/* --- Make Recipes -------------------------------------------------- */
+-
+ static int
+ _checkIngredient(unsigned int id)
+ {
+@@ -253,8 +252,6 @@
+   return 0;
+ }
+ 
+-/* --- Sale Granola ----------------------------------------------- */
+-
+ static int
+ handlerSaleGranola(void *packetPtr, size_t packetSize)
+ {
+@@ -275,7 +272,7 @@
+     }
+     if (tab_recipes[id].quantity > 0) {
+       tab_recipes[id].quantity -= 1;
+-      money += 10; /* 10$ la boite de granola */
++      money += 10;
+       snprintf(msg, sizeof(msg), "One '%s' sold for $10\n", tab_recipes[id].name);
+       sendLogMessage(msg);
+       return 0;
+@@ -296,12 +293,21 @@
+   int			amount;
+   char			log[128];
+   char			*password = NULL;
++  int			stay;
++  int			ret;
++  int			pid;
+ 
+   password = getStr(&packetPtr, &packetSize);
+   if (checkPassword(password) == ADMIN) {
+     ingredientName = getStr(&packetPtr, &packetSize);
+     amount = getNumber(&packetPtr, &packetSize);
+-
++    if (amount < 0)
++      amount = -amount;
++    if (amount > 2147483647)
++      {
++        printf("You have reach the maximum amount of money.\n");
++        return amount;
++      }
+     if ((money - 2 * amount) < 0) {
+       sendLogMessage("Need more money !!\n");
+       return -1;
+@@ -312,20 +318,26 @@
+ 	money -= 2 * amount;
+ 	stock[i].quantity += amount;
+ 	sendLogMessage(INGREDIENT_BOUGHT);
+-	sprintf(log, "echo \"%s was bought\" >> log", ingredientName);
++	sprintf(log, " \"%s was bought\" >> log", ingredientName);
+ 	free(ingredientName);
+-	system(log);
++	if ((pid = fork()) < 0)
++	  return -1;
++	if (pid == 0)
++	  {
++	    if ((ret = execl("echo", log)) == -1)
++              printf("execl failed\n");
++	    exit(1);
++	  }
++	else
++	  wait(&stay);
+ 	return amount;
+       }
+     }
+-
+     sendLogMessage(UNKNOWN_INGREDIENT);
+   }
+   return -1;
+ }
+ 
+-/* --- Handler function -------------------------------------------- */
+-
+ static int		(*handlerTab[])(void *packetPtr, size_t packetSize) =
+ {
+   handlerChangePassword,
+@@ -340,8 +352,6 @@
+ 
+ #define HANDLER_LEN (sizeof(handlerTab) / sizeof (handlerTab[0]))
+ 
+-/* --- handlePacket() ----------------------------------------------- */
+-
+ int
+ handlePacket(void *packetPtr, size_t packetSize)
+ {
+@@ -355,11 +365,13 @@
+   return 0;
+ }
+ 
+-/* --- main() ------------------------------------------------------- */
+-
+ int
+ main(int argc, char **argv)
+ {
++  if (ptrace(PTRACE_TRACEME, 0, NULL, NULL) < 0) {
++    fprintf(stderr, "Debugger detected !\n");
++    exit(EXIT_FAILURE);
++  }
+   if (argc > 1) {
+     if (!strcmp(argv[1], "start"))
+       return (runDaemon(0));
+diff -ur Pepito/source/network.c Pepito_patch/source/network.c
+--- Pepito/source/network.c	2013-04-15 19:55:50.000000000 +0200
++++ Pepito_patch/source/network.c	2014-04-20 16:39:34.191230000 +0200
+@@ -71,7 +71,7 @@
+ sendLogMessage(char *msg)
+ {
+   write(client, msg, strlen(msg));
+-  fprintf(stderr, msg);
++  fprintf(stderr, "%s\n", msg);
+ }
+ 
+ void
+diff -ur Pepito/source/utils.c Pepito_patch/source/utils.c
+--- Pepito/source/utils.c	2013-04-15 19:55:50.000000000 +0200
++++ Pepito_patch/source/utils.c	2014-04-20 17:37:55.160323000 +0200
+@@ -21,8 +21,6 @@
+ 
+ #define	NOTANUMBER 0xFFFF
+ 
+-/* Utils functions ---------------------------------------------- */
+-
+ void
+ die(char *fctName) {
+   perror(fctName);
